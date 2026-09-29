@@ -383,7 +383,7 @@ function valuate(h){
   if(price==null)return {cur:pcur,value:null,cost:null,price:null,status:(p&&p.error)?"error":"pending",err:p&&p.error};
   const E=effQty(h);const value=E.q*price/k.unit;
   const cost=(typeof h.cost==="number")?(+h.qty||0)*h.cost/k.unit+E.addCost(pcur):null;
-  return {cur:pcur,value,cost,price,asOf,src,status:"ok",pName:p&&p.name};
+  return {cur:pcur,value,cost,price,asOf,src,status:"ok",pName:p&&p.name,err:p&&p.error};
 }
 function portfolio(){
   const b=base();let total=0,costT=0,valWithCost=0,missing=0;const byKind={};
@@ -498,7 +498,7 @@ function renderHoldings(){
     h+=`<tr class="grp"><td colspan="6"><span class="dot" style="background:var(--s${K.slot});margin-right:8px"></span>${K.label}<span class="num">${money(P.byKind[k]||0,b)}</span></td></tr>`;
     rows.sort((x,y)=>(y.vb||0)-(x.vb||0)).forEach(({h:x,v,vb,cb})=>{
       const plv=(v.value!=null&&v.cost!=null)?v.value-v.cost:null;
-      let priceCell="—";if(!K.noCode){if(v.status==="ok")priceCell=`<span class="num">${money(v.price,v.cur,{d:Math.max(digits(v.cur),v.price<100?2:0)})}</span>${v.src==="manual"?'<br><span class="pill">手動</span>':`<br><span class="code">${when(v.asOf)}${k==="fund"?" /1万口":""}</span>`}`;else if(v.status==="error")priceCell=`<span class="pill warn" title="${esc(v.err)}">取得できず</span>`;else priceCell='<span class="pill warn">価格待ち</span>'}
+      let priceCell="—";if(!K.noCode){if(v.status==="ok")priceCell=`<span class="num">${money(v.price,v.cur,{d:Math.max(digits(v.cur),v.price<100?2:0)})}</span>${v.src==="manual"?'<br><span class="pill">手動</span>':`<br><span class="code">${when(v.asOf)}${k==="fund"?" /1万口":""}</span>`}${v.err?`<br><span class="pill warn">最新の取得に失敗</span><br><span class="sm" style="color:var(--warn)">${esc(v.err)}</span>`:""}`;else if(v.status==="error")priceCell=`<span class="pill warn">取得できず</span><br><span class="sm" style="color:var(--warn)">${esc(v.err||"")}</span>`;else priceCell='<span class="pill warn">価格待ち</span>'}
       h+=`<tr class="row" data-id="${esc(x.id)}"><td><div class="nm">${esc(x.name||x.symbol||K.label)}${K.noCode&&S.pays.some(p=>p.accountId===x.id)?' <span class="pill info">支払い連携</span>':""}</div><div class="code">${esc([x.symbol,x.account].filter(Boolean).join(" · "))}</div></td>
       <td class="num">${K.noCode?"—":numf(effQty(x).q)}</td><td>${priceCell}</td><td class="num">${money(v.value,v.cur)}</td><td class="num">${money(vb,b)}</td>
       <td class="num ${signCls(plv)}">${plv!=null?money(plv,v.cur,{sign:true})+`<br><span class="sm ${signCls(plv)}">${pct(plv/v.cost)}</span>`:"—"}</td></tr>`})});
@@ -629,7 +629,7 @@ async function cryptoPrices(keys){const out={};const ids={};
 async function gasCall(extra){const url=(S.cfg.gasUrl||"").trim();if(!url)throw new Error("未設定");return getJSON(url+(url.includes("?")?"&":"?")+"token="+encodeURIComponent(S.cfg.gasToken||"")+extra)}
 async function refreshNow(opts){opts=opts||{};
   if(S.refreshing||S.dbState!=="ok")return;S.refreshing=true;renderOverview();renderSettings();
-  const now=new Date().toISOString(),errs=[];let fails=0,okN=0;
+  const now=new Date().toISOString(),errs=[],failNames=[];let fails=0,okN=0;
   try{const j=await getJSON("https://open.er-api.com/v6/latest/USD");
     if(j&&j.rates&&j.rates.USD===1&&j.rates.JPY>50&&Object.keys(j.rates).length>100)await S.db.doc("fx/latest").set({base:"USD",asOf:j.time_last_update_unix?new Date(j.time_last_update_unix*1000).toISOString():now,source:"open.er-api.com",rates:j.rates});else errs.push("為替")}catch(e){errs.push("為替")}
   const keys=[...new Set(S.holdings.filter(h=>!isAcct(h)&&h.priceKey).map(h=>h.priceKey))];let got={};
@@ -640,9 +640,9 @@ async function refreshNow(opts){opts=opts||{};
   for(const k of keys){const g=got[k],tried=k.startsWith("crypto:")||!!S.cfg.gasUrl;if(!tried)continue;
     const old=S.prices[k],prev=old&&old.price;
     if(g&&g.price>0&&!(prev&&(g.price>prev*3||g.price<prev/3))){okN++;await S.db.doc("prices/"+k).set({price:g.price,currency:g.currency||"JPY",asOf:g.asOf||now,source:g.source||"",name:g.name||(old&&old.name)||""})}
-    else{fails++;const msg=(g&&g.error)||(g&&g.price>0?"前回から大きく変わったため保留":"取得できませんでした");
+    else{fails++;const msg=(g&&g.error)||(g&&g.price>0?"前回から大きく変わったため保留":"取得できませんでした");const hh=S.holdings.find(h=>h.priceKey===k);failNames.push((hh&&(hh.name||hh.symbol))||k);
       if(old)await S.db.doc("prices/"+k).update({error:msg,errorAt:now});else await S.db.doc("prices/"+k).set({error:msg,errorAt:now})}}
-  const st=errs.length?errs.join("・")+"の取得に失敗":fails?`一部取得失敗（${fails}件）`:"ok";
+  const st=errs.length?errs.join("・")+"の取得に失敗":fails?`一部取得失敗（${failNames.join("、")}）`:"ok";
   await saveCfg({lastRunAt:now,lastRunStatus:st});
   await snapshotHistory();
   S.refreshing=false;renderAll();
