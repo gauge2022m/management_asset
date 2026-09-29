@@ -11,7 +11,8 @@ function doGet(e) {
   if (p.token !== TOKEN) return out({ error: '合言葉が違います' });
   const keys = String(p.keys || '').split(',').map(s => s.trim()).filter(String);
   if (p.test) return out({ ok: true, prices: {} });
-  const res = {};
+  const res = {}, diag = {};
+  const debug = !!p.debug;
   const gf = [];
   keys.forEach(k => {
     const i = k.indexOf(':');
@@ -39,14 +40,17 @@ function doGet(e) {
       const price = r[1];
       if (typeof price === 'number' && price > 0) {
         res[r[0]] = { price: price, currency: r[2], asOf: new Date().toISOString(), source: 'GOOGLEFINANCE' };
+        if (debug) diag[r[0]] = { googlefinance: price };
       } else {
-        // GOOGLEFINANCE で取れない時は Google Finance のページから読む
-        const alt = financePage(gf[i]);
-        res[r[0]] = alt || { error: 'GOOGLEFINANCE: ' + (String(price) || '空') + ' / ページからも取得できません' };
+        // GOOGLEFINANCE で取れない時は、別の取得先を順番に試す
+        const d = debug ? { googlefinance: String(price) } : null;
+        const alt = financePage(gf[i], d) || stooq(gf[i], d) || yahooJp(gf[i], d);
+        res[r[0]] = alt || { error: '取得できません（GOOGLEFINANCE: ' + (String(price) || '空') + '）' };
+        if (debug) diag[r[0]] = d;
       }
     });
   }
-  return out({ ok: true, prices: res });
+  return out(debug ? { ok: true, prices: res, diag: diag } : { ok: true, prices: res });
 }
 
 /** 投資信託協会のページから基準価額（1万口あたり）を読む */
@@ -73,7 +77,7 @@ function fundNav(isin) {
 }
 
 /** Google Finance のページ（例 https://www.google.com/finance/quote/6702:TYO）から現在値を読む */
-function financePage(g) {
+function financePage(g, d) {
   const k = g[0], kind = k.slice(0, k.indexOf(':')), sym = k.slice(k.indexOf(':') + 1);
   const urls = kind === 'jp' ? [sym + ':TYO']
     : kind === 'crypto' ? [sym + '-JPY']
@@ -83,11 +87,41 @@ function financePage(g) {
       const html = UrlFetchApp.fetch('https://www.google.com/finance/quote/' + q + '?hl=ja',
         { muteHttpExceptions: true, headers: { 'Accept-Language': 'ja' } }).getContentText('UTF-8');
       const m = html.match(/data-last-price="([0-9.]+)"/);
+      if (d) d['google:' + q] = m ? m[1] : 'なし(' + html.length + '文字)';
       if (m && Number(m[1]) > 0) {
         return { price: Number(m[1]), currency: g[2], asOf: new Date().toISOString(), source: 'Google Finance' };
       }
-    } catch (err) {}
+    } catch (err) { if (d) d['google:' + q] = String(err); }
   }
+  return null;
+}
+
+/** stooq.com の CSV（日本株 6702.jp / 米国株 vym.us） */
+function stooq(g, d) {
+  const k = g[0], kind = k.slice(0, k.indexOf(':')), sym = k.slice(k.indexOf(':') + 1);
+  if (kind !== 'jp' && kind !== 'us') return null;
+  const s = sym.toLowerCase() + (kind === 'jp' ? '.jp' : '.us');
+  try {
+    const txt = UrlFetchApp.fetch('https://stooq.com/q/l/?s=' + s + '&f=sd2t2ohlcv&h&e=csv', { muteHttpExceptions: true }).getContentText();
+    if (d) d.stooq = txt.slice(0, 160);
+    const line = txt.trim().split(/\r?\n/)[1] || '';
+    const c = line.split(',');
+    const close = Number(c[6]);
+    if (close > 0) return { price: close, currency: g[2], asOf: c[1] ? new Date(c[1] + 'T15:00:00+09:00').toISOString() : new Date().toISOString(), source: 'stooq' };
+  } catch (err) { if (d) d.stooq = String(err); }
+  return null;
+}
+
+/** Yahoo!ファイナンス（日本株のみ） */
+function yahooJp(g, d) {
+  const k = g[0];
+  if (k.indexOf('jp:') !== 0) return null;
+  try {
+    const html = UrlFetchApp.fetch('https://finance.yahoo.co.jp/quote/' + k.slice(3) + '.T', { muteHttpExceptions: true }).getContentText('UTF-8');
+    const m = html.match(/"price":"([0-9,.]+)"/);
+    if (d) d.yahoo = m ? m[1] : 'なし(' + html.length + '文字)';
+    if (m) { const v = Number(m[1].replace(/,/g, '')); if (v > 0) return { price: v, currency: 'JPY', asOf: new Date().toISOString(), source: 'Yahoo!ファイナンス' }; }
+  } catch (err) { if (d) d.yahoo = String(err); }
   return null;
 }
 
